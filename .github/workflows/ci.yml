@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same branch so a long queue does not pile up
+# while iterating.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      # DiskScope has no third-party dependencies, so there is nothing to
+      # resolve and no cache to warm. The build is the whole dependency story.
+      - name: Build
+        run: swift build --configuration release
+
+      - name: Run tests
+        run: swift run -c release DiskScopeTests
+
+      - name: Verify the tree is warning-free
+        run: |
+          # Treat warnings as failures for our own sources. Deprecation notices
+          # from the SDK are ignored, since we do not control them.
+          swift build 2>&1 | tee build.log
+          if grep -E "^/.*warning:" build.log; then
+            echo "::error::build produced warnings"
+            exit 1
+          fi
