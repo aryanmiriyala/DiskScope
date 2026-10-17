@@ -90,7 +90,11 @@ func registerClassifierTests() {
     test("classifier: unknown paths fall back rather than crashing") {
         let result = classifier.classify(path: "/Users/example/Totally/Unknown/Place")
         try expectEqual(result.category, .other)
-        try expectEqual(result.risk, .caution, "unknown data should be treated cautiously")
+        try expectEqual(
+            result.risk,
+            .destructive,
+            "unidentified data must never be offered for automatic removal"
+        )
     }
 
     test("classifier: user media folders are recognised as large media") {
