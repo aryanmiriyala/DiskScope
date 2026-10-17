@@ -24,6 +24,10 @@ $ diskscope explain ~/Library
                                           "System Data".
 ```
 
+> The block above is the intended output, not a transcript. `explain` is the
+> first command being built; see the status table for what runs today. The
+> numbers are illustrative.
+
 ## Status
 
 **Early. The analysis engine is solid and tested; the CLI is not written yet.**

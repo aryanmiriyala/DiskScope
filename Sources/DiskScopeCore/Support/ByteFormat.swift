@@ -49,12 +49,15 @@ public enum ByteFormat {
         return (negative ? "-" : "") + text + " " + units[unitIndex]
     }
 
-    /// Bytes without a unit, for columns where the unit is in the header.
-    public static func bare(_ bytes: Int64) -> String {
+    /// A count without a unit, for columns where the unit is in the header.
+    ///
+    /// Generic over integers because the same call sites format both byte
+    /// counts and file counts.
+    public static func bare<T: BinaryInteger>(_ value: T) -> String {
         let f = NumberFormatter()
         f.numberStyle = .decimal
         f.maximumFractionDigits = 0
-        return f.string(from: NSNumber(value: Double(abs(bytes)))) ?? "\(abs(bytes))"
+        return f.string(from: NSNumber(value: Int64(value))) ?? "\(value)"
     }
 
     public static func percent(_ part: Int64, of whole: Int64) -> String {
