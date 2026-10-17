@@ -1,3 +1,7 @@
 import Foundation
+import DiskScopeCore
 
-print("DiskScope test harness not yet populated.")
+registerHashTests()
+
+let status = await TestRunner.run(filter: CommandLine.arguments.dropFirst().first)
+exit(status)
