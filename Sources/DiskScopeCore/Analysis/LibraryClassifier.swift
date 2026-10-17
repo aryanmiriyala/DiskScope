@@ -207,7 +207,13 @@ public struct LibraryClassifier: Sendable {
             if trimmed == "/" { break }
         }
 
-        return Classification(category: .other, risk: .caution, matchedRule: "no rule matched")
+        // Defer to the category's own default rather than restating it here, so
+        // there is one place that decides how risky unidentified data is.
+        return Classification(
+            category: .other,
+            risk: DiskCategory.other.defaultRisk,
+            matchedRule: "no rule matched"
+        )
     }
 
     public func classify(_ url: URL) -> Classification {

@@ -48,10 +48,30 @@ public enum RiskLevel: Int, Sendable, Codable, Comparable, CaseIterable {
     }
 
     /// Whether DiskScope will offer a cleanup action at all.
-    public var isDeletable: Bool { self < .informational }
+    ///
+    /// Spelled out as a switch rather than `self < .informational` because the
+    /// raw ordering is about *how risky deletion is*, which is not the same
+    /// question as *whether to offer it*. `.destructive` sits below
+    /// `.informational` in the enum but is categorically excluded: it means the
+    /// user can remove it themselves if they are sure, and DiskScope will never
+    /// propose it. Deriving this from the comparison silently offered exactly
+    /// the data the risk model exists to protect.
+    public var isDeletable: Bool {
+        switch self {
+        case .regenerable, .disposable, .caution:
+            return true
+        case .destructive, .informational:
+            return false
+        }
+    }
 
     /// Whether cleanup requires the user to tick an extra confirmation box.
-    public var requiresExplicitConfirmation: Bool { self >= .disposable }
+    public var requiresExplicitConfirmation: Bool {
+        switch self {
+        case .regenerable: return false
+        case .disposable, .caution, .destructive, .informational: return true
+        }
+    }
 }
 
 /// The taxonomy of "what kind of thing is this".
@@ -249,8 +269,10 @@ public enum DiskCategory: String, Sendable, Codable, CaseIterable, Identifiable 
             """
         case .other:
             return """
-            Data that does not match a category DiskScope recognises. Shown honestly rather \
-            than hidden inside a catch-all bucket.
+            Data that does not match a category DiskScope recognises. Shown \
+            honestly rather than hidden inside a catch-all bucket, and never \
+            offered for automatic removal — if it were safe to delete, we would \
+            know what it was.
             """
         }
     }
@@ -292,7 +314,13 @@ public enum DiskCategory: String, Sendable, Codable, CaseIterable, Identifiable 
         case .timeMachineSnapshots, .systemVolume, .purgeable:
             return .informational
         case .other:
-            return .caution
+            // Deliberately destructive rather than caution. For anything
+            // DiskScope recognises, "caution" means the data belongs to a
+            // running app and clearing it may confuse that app. For an
+            // unidentified folder we have no such story: we do not know whose
+            // data it is, so it must not be offered for automatic removal. If
+            // grouping later identifies it, it inherits a proper risk.
+            return .destructive
         }
     }
 
