@@ -1,0 +1,19 @@
+.DS_Store
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+build/
+dist/
+
+# Generated app bundles
+DiskScope.app
+
+# Local scan output / logs
+*.diskscope-log
+scan-dumps/
+
+# Editors
+.vscode/
+.idea/
+*.swp
