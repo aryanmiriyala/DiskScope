@@ -90,8 +90,10 @@ public struct ExplainCommand: Command {
         terminal.line("  \(terminal.dim("Measured"))              \(terminal.bold(ByteFormat.string(report.totalAllocatedBytes)))")
         terminal.line("  \(terminal.dim("Safe to clear"))         \(terminal.paint(ByteFormat.string(report.reclaimableBytes), .green))")
 
-        let files = scan.directories.reduce(0) { $0 + $1.fileCount }
-        let directories = scan.directories.count
+        // `scan.fileCount` sums the per-directory counts, not the subtree
+        // totals, so nothing is counted twice.
+        let files = scan.fileCount
+        let directories = scan.totalDirectoryCount
         terminal.line("  \(terminal.dim("Contents"))              \(ByteFormat.bare(files)) files in \(ByteFormat.bare(directories)) directories")
 
         if scan.deduplicatedHardLinks > 0 {

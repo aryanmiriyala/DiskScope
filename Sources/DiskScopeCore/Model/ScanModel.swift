@@ -31,6 +31,14 @@ public struct DirectoryRecord: Sendable, Identifiable, Codable {
     /// Physical bytes of the whole subtree.
     public var subtreeAllocatedSize: Int64
 
+    /// Files sitting *directly* in this directory.
+    ///
+    /// Needed because `fileCount` is a subtree total: summing `fileCount` over
+    /// every directory counts each file once per ancestor, which inflated the
+    /// reported total by roughly seven times. `ownFileCount` is the only field
+    /// that can be summed without double counting.
+    public var ownFileCount: Int
+
     /// Number of files in this subtree (not including subdirectories).
     public var fileCount: Int
     /// Number of directories in this subtree, including this one.
@@ -55,6 +63,7 @@ public struct DirectoryRecord: Sendable, Identifiable, Codable {
         fileCount: Int = 0,
         directoryCount: Int = 1,
         symlinkCount: Int = 0,
+        ownFileCount: Int = 0,
         newestModification: Date? = nil
     ) {
         self.url = url
@@ -67,6 +76,7 @@ public struct DirectoryRecord: Sendable, Identifiable, Codable {
         self.fileCount = fileCount
         self.directoryCount = directoryCount
         self.symlinkCount = symlinkCount
+        self.ownFileCount = ownFileCount
         self.newestModification = newestModification
     }
 
@@ -194,13 +204,18 @@ public struct ScanResult: Sendable {
         self.scannedAllocatedSize = scannedAllocatedSize
     }
 
-    /// Total files observed.
+    /// Total files observed across the scan.
+    ///
+    /// Sums `ownFileCount`, never `fileCount`. `fileCount` is a subtree total,
+    /// so summing it over every directory would count each file once for the
+    /// directory holding it and again for every ancestor.
     public var fileCount: Int {
-        directories.filter { $0.url.lastPathComponent.count > 0 }
-            .reduce(0) { $0 + $1.fileCount }
+        directories.reduce(0) { $0 + $1.ownFileCount }
     }
 
-    public var directoryCount: Int { directories.count }
+    /// Total directories visited.
+    public var totalDirectoryCount: Int { directories.count }
+
 
 
     public var isComplete: Bool { deniedPaths.isEmpty }
