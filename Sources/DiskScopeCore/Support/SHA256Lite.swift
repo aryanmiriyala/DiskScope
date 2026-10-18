@@ -1,5 +1,9 @@
 import Foundation
 
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
+
 /// Minimal SHA-256, used for duplicate fingerprinting and short file hashing.
 ///
 /// DiskScope's only real need is "are these two files the same bytes", and it
@@ -29,11 +33,22 @@ public enum SHA256Lite {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
 
+        #if canImport(CryptoKit)
+        // Apple's implementation runs at hardware speed. The portable fallback
+        // below manages roughly 1 MB/s on this workload, which would take hours
+        // over a real home directory, so this is not a micro-optimisation.
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return Data(hasher.finalize())
+        #else
         var hasher = Hasher()
         while let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty {
             hasher.update(chunk)
         }
         return hasher.finalize()
+        #endif
     }
 
     /// Lowercase hex of the SHA-256 digest of `data`.
@@ -58,8 +73,33 @@ public enum SHA256Lite {
 
     /// SHA-256 of in-memory bytes.
     public static func digest(of data: Data) -> Data {
+        #if canImport(CryptoKit)
+        return Data(SHA256.hash(data: data))
+        #else
         var hasher = Hasher()
         hasher.update(data)
+        return hasher.finalize()
+        #endif
+    }
+
+    /// Digest via the dependency-free implementation.
+    ///
+    /// Kept public and used by the test suite to prove the CryptoKit fast path
+    /// agrees with the reference implementation byte for byte. A correctness
+    /// test that only ever exercises the fast path would agree with itself.
+    public static func referenceDigest(of data: Data) -> Data {
+        var hasher = Hasher()
+        hasher.update(data)
+        return hasher.finalize()
+    }
+
+    public static func referenceDigest(ofFileAt url: URL, chunkSize: Int = 1 << 20) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = Hasher()
+        while let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty {
+            hasher.update(chunk)
+        }
         return hasher.finalize()
     }
 
@@ -78,6 +118,17 @@ public enum SHA256Lite {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
 
+        #if canImport(CryptoKit)
+        var hasher = SHA256()
+        if fileSize > 0 {
+            hasher.update(data: try handle.read(upToCount: headBytes) ?? Data())
+        }
+        if fileSize > Int64(headBytes + tailBytes) {
+            try handle.seek(toOffset: UInt64(max(0, fileSize - Int64(tailBytes))))
+            hasher.update(data: try handle.read(upToCount: tailBytes) ?? Data())
+        }
+        return Data(hasher.finalize())
+        #else
         var hasher = Hasher()
 
         if fileSize > 0 {
@@ -92,6 +143,7 @@ public enum SHA256Lite {
         }
 
         return hasher.finalize()
+        #endif
     }
 
     public struct Hasher {
