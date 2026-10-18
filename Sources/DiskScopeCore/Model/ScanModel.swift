@@ -155,6 +155,25 @@ public struct DeniedPathRecord: Sendable, Identifiable, Codable, Hashable {
     }
 }
 
+/// A mounted filesystem that was deliberately not walked.
+///
+/// Recording these matters for honesty: "78 GB" and "78 GB plus 200 GB on an
+/// external drive you did not ask about" are different claims, and a report
+/// that silently omits the second looks like it examined everything.
+public struct SkippedMount: Sendable, Identifiable, Codable {
+    /// Where the other filesystem is mounted.
+    public let url: URL
+    /// The device identifier the mount belongs to, for the report to show.
+    public let device: UInt64
+
+    public var id: URL { url }
+
+    public init(url: URL, device: UInt64) {
+        self.url = url
+        self.device = device
+    }
+}
+
 /// The result of walking one root.
 ///
 /// A scan is always scoped to a set of explicit roots so that the user (and the
@@ -164,6 +183,8 @@ public struct ScanResult: Sendable {
     public var directories: [DirectoryRecord]
     public var largeFiles: [LargeFileRecord]
     public var deniedPaths: [DeniedPathRecord]
+    /// Mounted filesystems left unwalked because they sit on another device.
+    public var skippedMounts: [SkippedMount]
 
     /// Filesystem-reported totals keyed by volume identifier, used to sanity-check
     /// our own arithmetic against what APFS claims.
@@ -185,6 +206,7 @@ public struct ScanResult: Sendable {
         directories: [DirectoryRecord] = [],
         largeFiles: [LargeFileRecord] = [],
         deniedPaths: [DeniedPathRecord] = [],
+        skippedMounts: [SkippedMount] = [],
         volumeTotals: [VolumeUsage] = [],
         startedAt: Date = .now,
         finishedAt: Date = .now,
@@ -196,6 +218,7 @@ public struct ScanResult: Sendable {
         self.directories = directories
         self.largeFiles = largeFiles
         self.deniedPaths = deniedPaths
+        self.skippedMounts = skippedMounts
         self.volumeTotals = volumeTotals
         self.startedAt = startedAt
         self.finishedAt = finishedAt
@@ -218,7 +241,9 @@ public struct ScanResult: Sendable {
 
 
 
-    public var isComplete: Bool { deniedPaths.isEmpty }
+    /// True when nothing was blocked and nothing was skipped, i.e. the figures
+    /// can be treated as a complete account of what was scanned.
+    public var isComplete: Bool { deniedPaths.isEmpty && skippedMounts.isEmpty }
 
     /// True when any denial looks like it could be fixed by Full Disk Access.
     /// Privacy-protected folders such as `~/Library/Mail` return `EACCES` even

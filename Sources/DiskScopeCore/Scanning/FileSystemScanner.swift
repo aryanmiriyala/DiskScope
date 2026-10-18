@@ -98,6 +98,7 @@ final class ScanAccumulator: @unchecked Sendable {
     private var records: [DirectoryRecord] = []
     private var largeFiles: [LargeFileRecord] = []
     private var denied: [DeniedPathRecord] = []
+    private var skippedMounts: [SkippedMount] = []
     /// (device, inode) pairs already counted, so N hard links to one 4 GB file
     /// are reported as 4 GB rather than 12 GB.
     private var countedInodes: Set<HardlinkKey> = []
@@ -154,6 +155,12 @@ final class ScanAccumulator: @unchecked Sendable {
         lock.unlock()
     }
 
+    func addSkippedMount(_ mount: SkippedMount) {
+        lock.lock()
+        skippedMounts.append(mount)
+        lock.unlock()
+    }
+
     var deduplicatedHardLinkCount: Int {
         lock.lock()
         defer { lock.unlock() }
@@ -168,7 +175,7 @@ final class ScanAccumulator: @unchecked Sendable {
 
     func drain(
         maximumLargeFiles: Int
-    ) -> (records: [DirectoryRecord], largeFiles: [LargeFileRecord], denied: [DeniedPathRecord]) {
+    ) -> (records: [DirectoryRecord], largeFiles: [LargeFileRecord], denied: [DeniedPathRecord], skipped: [SkippedMount]) {
         lock.lock()
         defer { lock.unlock() }
 
@@ -177,10 +184,11 @@ final class ScanAccumulator: @unchecked Sendable {
             .sorted { $0.logicalSize > $1.logicalSize }
             .prefix(maximumLargeFiles)
 
-        let result = (records, Array(trimmedLarge), denied)
+        let result = (records, Array(trimmedLarge), denied, skippedMounts)
         records = []
         largeFiles = []
         denied = []
+        skippedMounts = []
         return result
     }
 }
@@ -334,7 +342,7 @@ public struct FileSystemScanner: Sendable {
         // an ancestor sits on a permit while awaiting a child that cannot
         // acquire one, and the tree stops making progress.
         let contents = await semaphore.withPermit { [self] in
-            scanDirectoryContents(url: url)
+            scanDirectoryContents(url: url, rootDevice: rootDevice)
         }
 
         var aggregate = Aggregate()
@@ -432,7 +440,7 @@ public struct FileSystemScanner: Sendable {
     ///   needed: a child directory, a large file, or a denial.
     /// * **No `Date` per entry.** Modification times are compared as integers
     ///   and converted once, per directory.
-    private func scanDirectoryContents(url: URL) -> DirectoryScan {
+    private func scanDirectoryContents(url: URL, rootDevice: UInt64?) -> DirectoryScan {
         var result = DirectoryScan()
         let threshold = configuration.largeFileThreshold
 
@@ -471,6 +479,27 @@ public struct FileSystemScanner: Sendable {
 
             switch childStat.st_mode & S_IFMT {
             case S_IFDIR:
+                let childDevice = UInt64(childStat.st_dev)
+
+                // Do not descend into another filesystem. This is what stops a
+                // scan of ~/Library walking into the simulator runtime volumes
+                // mounted under /Library/Developer/CoreSimulator/Volumes, or a
+                // home scan from wandering onto a mounted network share.
+                //
+                // The flag used to be declared, stored and never read, which
+                // meant it silently did nothing.
+                if !Self.shouldDescend(
+                    childDevice: childDevice,
+                    rootDevice: rootDevice,
+                    stayOnOneFilesystem: configuration.stayOnOneFilesystem
+                ) {
+                    accumulator.addSkippedMount(SkippedMount(
+                        url: url.appending(path: name(of: entry)),
+                        device: childDevice
+                    ))
+                    continue
+                }
+
                 result.children.append(url.appending(path: name(of: entry)))
 
             case S_IFREG:
@@ -516,6 +545,22 @@ public struct FileSystemScanner: Sendable {
         }
 
         return result
+    }
+
+    /// Whether the walk should descend into a directory on `childDevice`.
+    ///
+    /// Extracted as a pure function so the policy can be tested without needing a
+    /// real mounted filesystem, which is the only way this branch gets exercised
+    /// in practice and which CI cannot rely on.
+    public static func shouldDescend(
+        childDevice: UInt64,
+        rootDevice: UInt64?,
+        stayOnOneFilesystem: Bool
+    ) -> Bool {
+        // With no root device established yet there is nothing to compare
+        // against, so allow the walk and let it establish one.
+        guard stayOnOneFilesystem, let rootDevice else { return true }
+        return childDevice == rootDevice
     }
 
     /// Whether a `dirent` is `.` or `..`, checked byte-wise.
