@@ -4,6 +4,7 @@ import DiskScopeCore
 registerHashTests()
 registerByteFormatTests()
 registerScannerTests()
+registerTotalsTests()
 registerClassifierTests()
 registerBreakdownTests()
 registerGroundingTests()
