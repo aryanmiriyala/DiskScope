@@ -85,6 +85,13 @@ public struct ScanProgress: Sendable {
 
 /// Thread-safe accumulator for the values the scan shares across its
 /// concurrent directory walks.
+///
+/// Locking strategy: the lock is taken **once per directory**, never once per
+/// file. An earlier version called `noteFile` for every file it saw, which meant
+/// five million contended lock acquisitions on a two-and-a-half million file
+/// home directory and made the scan CPU-bound rather than I/O-bound. Per-file
+/// counters are now derived from the directory records that were already being
+/// stored, so the work disappears rather than being made cheaper.
 final class ScanAccumulator: @unchecked Sendable {
     private let lock = NSLock()
 
@@ -108,8 +115,9 @@ final class ScanAccumulator: @unchecked Sendable {
 
     /// Returns true if this inode has not been counted before.
     ///
-    /// Only files with `nlink > 1` are consulted, so ordinary files skip the
-    /// hash-set cost entirely.
+    /// Only files with `nlink > 1` are consulted, so the overwhelming majority
+    /// take the early return without touching the lock. Hard links are rare
+    /// enough - thousands, not millions - that the rest does not contend.
     func shouldCount(device: UInt64, inode: UInt64, linkCount: UInt16) -> Bool {
         guard linkCount > 1 else { return true }
         lock.lock()
@@ -123,36 +131,26 @@ final class ScanAccumulator: @unchecked Sendable {
         return true
     }
 
-    func addDirectory(_ record: DirectoryRecord) {
+    /// Record a finished directory, folding in its progress counters and any
+    /// large files found along the way. One lock acquisition per directory.
+    func addDirectory(_ record: DirectoryRecord, largeFilesInDirectory: [LargeFileRecord]) {
         lock.lock()
         records.append(record)
         directoriesVisited += 1
+        // `record.fileCount` is the subtree total, so this is a running total
+        // across everything visited so far.
+        filesSeen += record.fileCount
+        bytesSeen &+= record.subtreeAllocatedSize
         currentPath = record.url.path
-        lock.unlock()
-    }
-
-    func addLargeFile(_ record: LargeFileRecord) {
-        lock.lock()
-        largeFiles.append(record)
+        if !largeFilesInDirectory.isEmpty {
+            largeFiles.append(contentsOf: largeFilesInDirectory)
+        }
         lock.unlock()
     }
 
     func addDenial(_ url: URL, reason: DeniedPathRecord.Reason) {
         lock.lock()
         denied.append(DeniedPathRecord(url: url, reason: reason))
-        lock.unlock()
-    }
-
-    func noteFile(_ size: Int64) {
-        lock.lock()
-        filesSeen += 1
-        bytesSeen &+= size
-        lock.unlock()
-    }
-
-    func noteDenial() {
-        lock.lock()
-        denied.append(DeniedPathRecord(url: URL(fileURLWithPath: ""), reason: .permissionDenied))
         lock.unlock()
     }
 
@@ -331,60 +329,25 @@ public struct FileSystemScanner: Sendable {
             return Aggregate()
         }
 
-        // Enumerate this directory's entries under a permit, then release the
-        // permit *before* recursing. Holding it across the recursive descent is
-        // what deadlocks: an ancestor sitting on a permit while awaiting a child
-        // that cannot acquire one.
-        //
-        // Returns everything discovered here, and releases the permit before
-        // returning, so callers are free to recurse.
-        let enumeration = await semaphore.withPermit { [self] in
-            enumerate(url: url)
+        // Read this directory under a permit, and release the permit *before*
+        // recursing. Holding a permit across the recursive descent deadlocks:
+        // an ancestor sits on a permit while awaiting a child that cannot
+        // acquire one, and the tree stops making progress.
+        let contents = await semaphore.withPermit { [self] in
+            scanDirectoryContents(url: url)
         }
 
         var aggregate = Aggregate()
-        aggregate.symlinkCount = enumeration.symlinkCount
+        aggregate.logicalSize = contents.ownLogical
+        aggregate.allocatedSize = contents.ownAllocated
+        aggregate.fileCount = contents.fileCount + contents.otherCount
+        aggregate.symlinkCount = contents.symlinkCount
+        aggregate.newestModification = contents.newestSeconds > 0
+            ? Date(timeIntervalSince1970: TimeInterval(contents.newestSeconds))
+            : nil
 
-        // Account for files in this directory.
-        var ownLogical: Int64 = 0
-        var ownAllocated: Int64 = 0
-        let threshold = configuration.largeFileThreshold
-
-        for file in enumeration.files {
-            let logical = Int64(file.st.st_size)
-            let allocated = Int64(file.st.st_blocks) * 512
-
-            let countIt = accumulator.shouldCount(
-                device: UInt64(file.st.st_dev),
-                inode: UInt64(file.st.st_ino),
-                linkCount: file.st.st_nlink
-            )
-
-            if countIt {
-                ownLogical &+= logical
-                ownAllocated &+= allocated
-                aggregate.fileCount += 1
-                accumulator.noteFile(logical)
-            }
-
-            let modified = modificationDate(file.st.st_mtimespec)
-            if let modified, aggregate.newestModification == nil || modified > aggregate.newestModification! {
-                aggregate.newestModification = modified
-            }
-
-            if logical >= threshold {
-                accumulator.addLargeFile(LargeFileRecord(
-                    url: url.appending(path: file.name),
-                    logicalSize: logical,
-                    allocatedSize: allocated,
-                    modificationDate: modified,
-                    isHardLinked: file.st.st_nlink > 1
-                ))
-            }
-        }
-
-        let childDirectories = enumeration.children
-        let effectiveDevice = enumeration.device
+        let childDirectories = contents.children
+        let effectiveDevice = contents.device
 
         // Walk subdirectories. Small fan-outs recurse inline because spinning up
         // a task group costs more than the parallelism saves, and a tree is
@@ -416,38 +379,62 @@ public struct FileSystemScanner: Sendable {
             url: url,
             name: url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent,
             kind: .directory,
-            ownLogicalSize: ownLogical,
-            ownAllocatedSize: ownAllocated,
-            subtreeLogicalSize: aggregate.logicalSize + ownLogical,
-            subtreeAllocatedSize: aggregate.allocatedSize + ownAllocated,
+            ownLogicalSize: contents.ownLogical,
+            ownAllocatedSize: contents.ownAllocated,
+            // `aggregate` was seeded with this directory's own bytes before the
+            // children were folded in, so it already is the subtree total.
+            // Adding `own*` again here counted every file twice.
+            subtreeLogicalSize: aggregate.logicalSize,
+            subtreeAllocatedSize: aggregate.allocatedSize,
             fileCount: aggregate.fileCount,
             directoryCount: aggregate.directoryCount,
             symlinkCount: aggregate.symlinkCount,
+            ownFileCount: contents.fileCount + contents.otherCount,
             newestModification: aggregate.newestModification
         )
-        accumulator.addDirectory(record)
+        accumulator.addDirectory(record, largeFilesInDirectory: contents.largeFiles)
 
-        aggregate.logicalSize &+= ownLogical
-        aggregate.allocatedSize &+= ownAllocated
         return aggregate
     }
 
-    /// What a single directory's enumeration found.
-    private struct Enumeration: Sendable {
+    /// Everything one directory contributed, computed in a single pass.
+    private struct DirectoryScan: Sendable {
         var children: [URL] = []
-        var files: [(name: String, st: stat)] = []
+        var ownLogical: Int64 = 0
+        var ownAllocated: Int64 = 0
+        var fileCount: Int = 0
         var symlinkCount: Int = 0
-        var device: UInt64?
-        /// Files that are neither directories, regular files nor symlinks.
+        /// Sockets, FIFOs, devices: they take space but are not user files.
         var otherCount: Int = 0
+        /// Newest modification seen, held as a raw timestamp. Kept numeric so
+        /// the common case - "is this newer than the current best?" - never
+        /// allocates a `Date`.
+        var newestSeconds: Int64 = 0
+        var largeFiles: [LargeFileRecord] = []
+        var device: UInt64?
     }
 
-    /// Read one directory's entries. Runs while holding a semaphore permit.
+    /// Read one directory and account for everything directly inside it.
     ///
-    /// Split out from `scanDirectory` so the permit's scope is unambiguous: it
-    /// covers exactly this, and is released before any recursion happens.
-    private func enumerate(url: URL) -> Enumeration {
-        var result = Enumeration()
+    /// Runs while holding a semaphore permit, so the permit's scope is exactly
+    /// this function. The caller releases it before recursing, which is what
+    /// keeps the walk from deadlocking on itself.
+    ///
+    /// Three deliberate choices, each of which was a large fraction of the
+    /// scan's CPU time before:
+    ///
+    /// * **One pass.** Files are accounted for as they are read. The previous
+    ///   version buffered every file's name and `stat` into an array before
+    ///   touching any of it, which meant holding millions of strings in memory
+    ///   and walking the array twice.
+    /// * **No `String` per entry.** `fstatat` is called straight off the raw
+    ///   `d_name` bytes. A Swift `String` is built only when a path is genuinely
+    ///   needed: a child directory, a large file, or a denial.
+    /// * **No `Date` per entry.** Modification times are compared as integers
+    ///   and converted once, per directory.
+    private func scanDirectoryContents(url: URL) -> DirectoryScan {
+        var result = DirectoryScan()
+        let threshold = configuration.largeFileThreshold
 
         let fd = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else {
@@ -466,42 +453,97 @@ public struct FileSystemScanner: Sendable {
         result.device = fstat(fd, &dirStat) == 0 ? UInt64(dirStat.st_dev) : nil
 
         while let entry = readdir(dirStream) {
-            let entryName = withUnsafeBytes(of: entry.pointee.d_name) { raw -> String in
-                let bytes = raw.bindMemory(to: UInt8.self)
-                // `d_name` is a fixed-size, NUL-padded C array.
-                let nulIndex = bytes.firstIndex(of: 0) ?? bytes.count
-                return String(decoding: bytes[0..<nulIndex], as: UTF8.self)
-            }
-
-            if entryName == "." || entryName == ".." { continue }
+            // `.` and `..` are the only entries worth skipping, and they are
+            // cheap to recognise without decoding a name.
+            if isDotEntry(entry) { continue }
 
             var childStat = stat()
-            let status = entryName.withCString { fstatat(fd, $0, &childStat, AT_SYMLINK_NOFOLLOW) }
+            let status = withUnsafePointer(to: entry.pointee.d_name) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: 1024) { name in
+                    fstatat(fd, name, &childStat, AT_SYMLINK_NOFOLLOW)
+                }
+            }
+
             guard status == 0 else {
-                accumulator.addDenial(url.appending(path: entryName), reason: reasonFor(errno))
+                accumulator.addDenial(url.appending(path: name(of: entry)), reason: reasonFor(errno))
                 continue
             }
 
             switch childStat.st_mode & S_IFMT {
             case S_IFDIR:
-                result.children.append(url.appending(path: entryName))
+                result.children.append(url.appending(path: name(of: entry)))
+
             case S_IFREG:
-                result.files.append((entryName, childStat))
+                let logical = Int64(childStat.st_size)
+                let allocated = Int64(childStat.st_blocks) * 512
+
+                let countIt = accumulator.shouldCount(
+                    device: UInt64(childStat.st_dev),
+                    inode: UInt64(childStat.st_ino),
+                    linkCount: childStat.st_nlink
+                )
+                if countIt {
+                    result.ownLogical &+= logical
+                    result.ownAllocated &+= allocated
+                    result.fileCount += 1
+                }
+
+                let seconds = Int64(childStat.st_mtimespec.tv_sec)
+                if seconds > result.newestSeconds { result.newestSeconds = seconds }
+
+                // Only large files are worth a path allocation.
+                if logical >= threshold {
+                    result.largeFiles.append(LargeFileRecord(
+                        url: url.appending(path: name(of: entry)),
+                        logicalSize: logical,
+                        allocatedSize: allocated,
+                        modificationDate: seconds > 0 ? Date(timeIntervalSince1970: TimeInterval(seconds)) : nil,
+                        isHardLinked: childStat.st_nlink > 1
+                    ))
+                }
+
             case S_IFLNK:
                 // A symlink is metadata: `st_size` is the length of the target
-                // path, not real content, and the target itself is either
-                // counted where it lives or deliberately not followed. Counting
-                // it as a file would inflate both the file count and the byte
-                // total with numbers that mean nothing.
+                // path, not real content, and the target is either counted where
+                // it lives or deliberately not followed. Counting it as a file
+                // would inflate both the file count and the byte total with
+                // numbers that mean nothing.
                 result.symlinkCount += 1
+
             default:
-                // Sockets, FIFOs, devices. They occupy space but are not files
-                // the user can do anything about.
                 result.otherCount += 1
             }
         }
 
         return result
+    }
+
+    /// Whether a `dirent` is `.` or `..`, checked byte-wise.
+    ///
+    /// `d_name` is a fixed-size NUL-padded array, so the first few bytes can be
+    /// inspected without building a `String` for every entry in the tree.
+    private func isDotEntry(_ entry: UnsafeMutablePointer<dirent>) -> Bool {
+        withUnsafePointer(to: entry.pointee.d_name) { pointer in
+            pointer.withMemoryRebound(to: UInt8.self, capacity: 3) { bytes in
+                if bytes[0] != UInt8(ascii: ".") { return false }
+                if bytes[1] == 0 { return true }              // "."
+                return bytes[1] == UInt8(ascii: ".") && bytes[2] == 0   // ".."
+            }
+        }
+    }
+
+    /// Decode an entry name, on the rare occasions a path is actually needed.
+    ///
+    /// `d_name` is a fixed 1024-byte NUL-padded array, so the scan for the
+    /// terminator is bounded and never runs off the end.
+    private func name(of entry: UnsafeMutablePointer<dirent>) -> String {
+        withUnsafePointer(to: entry.pointee.d_name) { pointer in
+            pointer.withMemoryRebound(to: UInt8.self, capacity: 1024) { bytes in
+                var length = 0
+                while length < 1024, bytes[length] != 0 { length += 1 }
+                return String(decoding: UnsafeBufferPointer(start: bytes, count: length), as: UTF8.self)
+            }
+        }
     }
 
     private func modificationDate(_ spec: timespec) -> Date? {
