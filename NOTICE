@@ -1,0 +1,10 @@
+DiskScope
+Copyright 2026 Aryan Miriyala
+
+This product includes software developed by Aryan Miriyala
+(https://github.com/aryanmiriyala/DiskScope).
+
+Portions of this software use the following third-party components:
+
+- Apple CryptoKit (SHA-256) — Apple Public Source License
+- POSIX system calls — public domain / standard interfaces
