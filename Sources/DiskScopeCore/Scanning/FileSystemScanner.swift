@@ -437,7 +437,65 @@ public struct FileSystemScanner: Sendable {
         var device: UInt64?
     }
 
+    /// Process entries returned by BulkAttributeFetcher
+    private func processBulkEntries(
+        _ entries: [BulkAttributeFetcher.Entry],
+        url: URL,
+        rootDevice: UInt64?,
+        threshold: Int64
+    ) -> DirectoryScan {
+        var result = DirectoryScan()
+        var dirStat = stat()
+        let fd0 = open(url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        defer { if fd0 >= 0 { close(fd0) } }
+        let effectiveDevice = (fd0 >= 0 && fstat(fd0, &dirStat) == 0) ? UInt64(dirStat.st_dev) : (rootDevice ?? 0)
+
+        for entry in entries {
+            if entry.isDirectory {
+                if !Self.shouldDescend(
+                    childDevice: effectiveDevice,
+                    rootDevice: effectiveDevice,
+                    stayOnOneFilesystem: configuration.stayOnOneFilesystem
+                ) {
+                    accumulator.addSkippedMount(SkippedMount(
+                        url: url.appending(path: entry.name),
+                        device: entry.fileID
+                    ))
+                    continue
+                }
+                result.children.append(url.appending(path: entry.name))
+            } else if entry.isRegularFile {
+                let logical = entry.logicalSize
+                let allocated = entry.allocatedSize
+
+                let countIt = accumulator.shouldCount(
+                    device: 0,
+                    inode: entry.fileID,
+                    linkCount: UInt16(truncatingIfNeeded: entry.linkCount)
+                )
+                if countIt {
+                    result.ownLogical &+= logical
+                    result.ownAllocated &+= allocated
+                    result.fileCount += 1
+                }
+                if entry.modTime > result.newestSeconds { result.newestSeconds = entry.modTime }
+
+                if logical >= threshold {
+                    result.largeFiles.append(LargeFileRecord(
+                        url: url.appending(path: entry.name),
+                        logicalSize: logical,
+                        allocatedSize: allocated,
+                        modificationDate: entry.modTime > 0 ? Date(timeIntervalSince1970: TimeInterval(entry.modTime / 1_000_000_000)) : nil,
+                        isHardLinked: entry.linkCount > 1
+                    ))
+                }
+            }
+        }
+        return result
+    }
+
     /// Read one directory and account for everything directly inside it.
+
     ///
     /// Runs while holding a semaphore permit, so the permit's scope is exactly
     /// this function. The caller releases it before recursing, which is what
@@ -456,8 +514,19 @@ public struct FileSystemScanner: Sendable {
     /// * **No `Date` per entry.** Modification times are compared as integers
     ///   and converted once, per directory.
     private func scanDirectoryContents(url: URL, rootDevice: UInt64?) -> DirectoryScan {
-        var result = DirectoryScan()
+        let _ = try? "SCAN: scanDirectoryContents called for ".write(to: URL(fileURLWithPath: "/tmp/diskscope_debug.log"), atomically: false, encoding: .utf8)
+        let _ = try? url.path.write(to: URL(fileURLWithPath: "/tmp/diskscope_debug.log"), atomically: false, encoding: .utf8)
         let threshold = configuration.largeFileThreshold
+        let _ = try? ("BULK: About to call fetchEntries\n").write(to: URL(fileURLWithPath: "/tmp/diskscope_debug.log"), atomically: false, encoding: .utf8)
+        if let entries = BulkAttributeFetcher.fetchEntries(at: url) {
+            let _ = try? ("BULK: Using bulk fetch\n").write(to: URL(fileURLWithPath: "/tmp/diskscope_debug.log"), atomically: false, encoding: .utf8)
+            return processBulkEntries(entries, url: url, rootDevice: rootDevice, threshold: threshold)
+        } else {
+            let _ = try? ("BULK: fetchEntries returned nil\n").write(to: URL(fileURLWithPath: "/tmp/diskscope_debug.log"), atomically: false, encoding: .utf8)
+        }
+
+        // Fallback to fstatat if bulk fetch fails
+        var result = DirectoryScan()
 
         let fd = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else {
