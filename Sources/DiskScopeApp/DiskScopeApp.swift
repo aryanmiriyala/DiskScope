@@ -28,6 +28,7 @@ struct DiskScopeMain {
             DiskCommand(),
             DoctorCommand(),
             CategoriesCommand(),
+            DuplicatesCommand(),
         ]
         let help = HelpCommand(commands: commands)
 

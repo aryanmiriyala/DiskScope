@@ -82,6 +82,67 @@ public enum ByteFormat {
         return String(format: "%.0f%%", value)
     }
 
+    /// Parse a byte count written the way a person would write it.
+    ///
+    /// Accepts a plain number of bytes, or a number with a unit: `500`,
+    /// `500B`, `5MB`, `1.5 GB`, `2GiB`. The decimal units match what
+    /// `string(_:)` prints, so the tool's own output can be fed back into it.
+    /// The binary units are accepted too, because they are what a person
+    /// reading a `stat` or a `df -h` will reach for.
+    ///
+    /// Returns nil for anything it does not understand. Callers are expected
+    /// to say so rather than fall back to a default: a size flag that quietly
+    /// ignores what was asked for is worse than one that refuses.
+    public static func parse(_ text: String) -> Int64? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !trimmed.isEmpty else { return nil }
+
+        // Split the number from the unit. The number may hold a decimal
+        // point, so the split is on the first character that is not one.
+        var digits = ""
+        var unit = ""
+        for character in trimmed {
+            if character.isNumber || character == "." {
+                if !unit.isEmpty { return nil }   // digits after the unit
+                digits.append(character)
+            } else if character.isWhitespace {
+                continue
+            } else {
+                unit.append(character)
+            }
+        }
+
+        guard let amount = Double(digits) else { return nil }
+
+        let multiplier: Double
+        switch unit {
+        case "", "b":
+            multiplier = 1
+        case "k", "kb":
+            multiplier = 1_000
+        case "m", "mb":
+            multiplier = 1_000_000
+        case "g", "gb":
+            multiplier = 1_000_000_000
+        case "t", "tb":
+            multiplier = 1_000_000_000_000
+        case "kib":
+            multiplier = 1_024
+        case "mib":
+            multiplier = 1_048_576
+        case "gib":
+            multiplier = 1_073_741_824
+        case "tib":
+            multiplier = 1_099_511_627_776
+        default:
+            return nil
+        }
+
+        let bytes = amount * multiplier
+        guard bytes >= 0, bytes <= Double(Int64.max) else { return nil }
+        return Int64(bytes)
+    }
+
     /// A rough age label — "3 days ago", "2 years ago".
     public static func relativeAge(_ date: Date?, now: Date = .now) -> String {
         guard let date else { return "unknown" }

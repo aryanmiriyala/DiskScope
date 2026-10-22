@@ -81,7 +81,7 @@ Early, and honest about it. The analysis engine is tested and validated against
 | Model grounding and validation | Done |
 | `explain`, `doctor`, `categories` | Done |
 | Byte totals validated against `du` | Verified |
-| Duplicate detection | Not started |
+| Duplicate detection | Done — `duplicates` command |
 | App inventory and leftovers | Not started |
 | `clean` (deletion) | Not started — **nothing is deleted today** |
 | `ask` (AI query) | Not started |
@@ -101,7 +101,7 @@ cp "$(swift build -c release --show-bin-path)/DiskScope" /usr/local/bin
 Run the tests:
 
 ```sh
-swift run DiskScopeTests              # all 72
+swift run DiskScopeTests              # all 108
 swift run DiskScopeTests scanner      # substring filter
 ```
 
@@ -111,6 +111,7 @@ swift run DiskScopeTests scanner      # substring filter
 diskscope explain ~/Library           # breakdown with explanations
 diskscope explain . --limit 5         # top 5 only
 diskscope explain ~/Library --json -  # machine-readable
+diskscope duplicates ~/Downloads      # byte-identical files
 diskscope doctor                      # check Full Disk Access
 diskscope categories                  # every category and what it means
 diskscope help explain
@@ -121,6 +122,47 @@ diskscope help explain
 | `--limit N` | Show only the N largest categories |
 | `--json FILE` | Write a report as JSON (`-` for stdout) |
 | `--no-color` | Disable ANSI colour. Also honours `NO_COLOR` |
+| `--min-size BYTES` | Smallest file `duplicates` will consider. Defaults to 1 MB |
+
+## Finding duplicates
+
+`diskscope duplicates <path>` finds files that hold exactly the same bytes and
+reports how much space removing the copies would release.
+
+```sh
+$ diskscope duplicates ~/Downloads --min-size 1MB
+
+Examined 5 files of 1.0 MB and above.
+
+Duplicate files found
+─────────────────────
+
+Total reclaimable space: 131 KB
+
+1. IMG_001.jpg  3 copies
+   Size per copy: 65.5 KB
+   Reclaimable:   131 KB
+   Keep:          ~/Downloads/photos/2023/IMG_001.jpg
+   SHA-256:       9348a08e3fbd6084
+   Remove:        ~/Downloads/photos/2024/IMG_001_copy.jpg 3 months ago
+```
+
+Hashing every file in full would take minutes over a real home directory, so
+the finder narrows the field before it spends any of that time. Files are
+grouped by size first — two files of different sizes cannot be duplicates —
+then the survivors are sampled at the head and the tail, and only the files
+whose samples collide are hashed in full.
+
+The candidates come from the scan's own file table, so the tree is walked once
+rather than twice. That also means the scan has to have recorded the files the
+finder cares about, and when it has not — because the scan's threshold was
+higher than `--min-size`, or because it kept only its largest files — the
+finder says so in an **Incomplete** section rather than reporting a clean
+result it cannot stand behind.
+
+**A hard link is not a copy.** Two names for one file are reported as one
+file, and they are not counted as reclaimable space: deleting one of them
+releases nothing, because the blocks stay reachable through the other.
 
 ## Why a terminal tool
 

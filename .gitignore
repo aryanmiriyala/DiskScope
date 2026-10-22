@@ -13,6 +13,9 @@ DiskScope.app
 *.diskscope-log
 scan-dumps/
 
+# Build log written by the CI warning gate
+build.log
+
 # Editors
 .vscode/
 .idea/

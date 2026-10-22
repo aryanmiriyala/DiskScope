@@ -42,5 +42,44 @@ func registerByteFormatTests() {
         try expectEqual(ByteFormat.relativeAge(now.addingTimeInterval(-172_800), now: now), "2 days ago")
         try expectEqual(ByteFormat.relativeAge(nil), "unknown")
     }
+
+    test("parse: a plain number is a number of bytes") {
+        try expectEqual(ByteFormat.parse("500"), 500)
+        try expectEqual(ByteFormat.parse("1048576"), 1_048_576)
+        try expectEqual(ByteFormat.parse("  500  "), 500)
+    }
+
+    test("parse: decimal units match the units the formatter prints") {
+        try expectEqual(ByteFormat.parse("1KB"), 1_000)
+        try expectEqual(ByteFormat.parse("5MB"), 5_000_000)
+        try expectEqual(ByteFormat.parse("1.5GB"), 1_500_000_000)
+        try expectEqual(ByteFormat.parse("2 tb"), 2_000_000_000_000)
+    }
+
+    test("parse: binary units are understood too") {
+        try expectEqual(ByteFormat.parse("1KiB"), 1_024)
+        try expectEqual(ByteFormat.parse("1MiB"), 1_048_576)
+        try expectEqual(ByteFormat.parse("1GiB"), 1_073_741_824)
+    }
+
+    test("parse: what cannot be read is rejected rather than guessed at") {
+        try expectEqual(ByteFormat.parse("banana"), nil)
+        try expectEqual(ByteFormat.parse(""), nil)
+        try expectEqual(ByteFormat.parse("12 apples"), nil)
+        try expectEqual(ByteFormat.parse("MB"), nil)
+        try expectEqual(ByteFormat.parse("-5"), nil)
+    }
+
+    test("parse: the formatter's own output can be read back") {
+        for bytes in [Int64(1), 512, 1_500, 1_000_000, 2_500_000_000] {
+            let text = ByteFormat.string(bytes)
+            let parsed = ByteFormat.parse(text)
+            try expect(parsed != nil, "could not read back \"\(text)\"")
+            // The formatter rounds to one decimal place, so the round trip is
+            // close rather than exact.
+            let difference = abs((parsed ?? 0) - bytes)
+            try expectLessThan(difference, bytes / 10 + 1)
+        }
+    }
 }
 

@@ -29,6 +29,7 @@ registerGroundingTests()
 registerPromptTests()
 registerBackendTests()
 registerKeychainTests()
+registerDuplicateFinderTests()
 
 let status = await TestRunner.run(filter: CommandLine.arguments.dropFirst().first)
 exit(status)

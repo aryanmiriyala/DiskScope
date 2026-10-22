@@ -46,6 +46,14 @@ public struct ScanConfiguration: Sendable {
     /// directories are real space, but unpacking them is not useful detail.
     public var skipGitInternals: Bool
 
+    /// Read a directory's attributes in one syscall, or one at a time.
+    ///
+    /// Both paths have to produce the same numbers, and the fallback has to
+    /// stay reachable for the directories the bulk path cannot handle. This
+    /// switch exists so the test suite can run a scan down both paths and
+    /// compare them.
+    public var useBulkAttributes: Bool
+
     public init(
         roots: [URL],
         largeFileThreshold: Int64 = 100 * 1024 * 1024,
@@ -54,7 +62,8 @@ public struct ScanConfiguration: Sendable {
         concurrency: Int = 8,
         stayOnOneFilesystem: Bool = true,
         excludedPaths: Set<String> = [],
-        skipGitInternals: Bool = true
+        skipGitInternals: Bool = true,
+        useBulkAttributes: Bool = true
     ) {
         self.roots = roots
         self.largeFileThreshold = largeFileThreshold
@@ -64,6 +73,7 @@ public struct ScanConfiguration: Sendable {
         self.stayOnOneFilesystem = stayOnOneFilesystem
         self.excludedPaths = excludedPaths
         self.skipGitInternals = skipGitInternals
+        self.useBulkAttributes = useBulkAttributes
     }
 
     public static var homeLibrary: ScanConfiguration {
@@ -190,16 +200,17 @@ final class ScanAccumulator: @unchecked Sendable {
 
     func drain(
         maximumLargeFiles: Int
-    ) -> (records: [DirectoryRecord], largeFiles: [LargeFileRecord], denied: [DeniedPathRecord], skipped: [SkippedMount]) {
+    ) -> (records: [DirectoryRecord], largeFiles: [LargeFileRecord], denied: [DeniedPathRecord], skipped: [SkippedMount], largeFilesTruncated: Bool) {
         lock.lock()
         defer { lock.unlock() }
 
         // Keep the biggest offenders; the tail is noise even if it exists.
+        let truncated = largeFiles.count > maximumLargeFiles
         let trimmedLarge = largeFiles
             .sorted { $0.logicalSize > $1.logicalSize }
             .prefix(maximumLargeFiles)
 
-        let result = (records, Array(trimmedLarge), denied, skippedMounts)
+        let result = (records, Array(trimmedLarge), denied, skippedMounts, truncated)
         records = []
         largeFiles = []
         denied = []
@@ -288,6 +299,8 @@ public struct FileSystemScanner: Sendable {
                 result.deniedPaths = drained.denied
                 result.deduplicatedHardLinks = accumulator.deduplicatedHardLinkCount
                 result.volumeTotals = VolumeProbe.usage()
+                result.largeFileThreshold = configuration.largeFileThreshold
+                result.largeFilesTruncated = drained.largeFilesTruncated
                 result.finishedAt = .now
 
                 continuation.yield(.finished(result))
@@ -459,7 +472,7 @@ public struct FileSystemScanner: Sendable {
                 ) {
                     accumulator.addSkippedMount(SkippedMount(
                         url: url.appending(path: entry.name),
-                        device: entry.fileID
+                        device: effectiveDevice
                     ))
                     continue
                 }
@@ -469,8 +482,8 @@ public struct FileSystemScanner: Sendable {
                 let allocated = entry.allocatedSize
 
                 let countIt = accumulator.shouldCount(
-                    device: 0,
-                    inode: entry.fileID,
+                    device: effectiveDevice,
+                    inode: entry.inode,
                     linkCount: UInt16(truncatingIfNeeded: entry.linkCount)
                 )
                 if countIt {
@@ -478,17 +491,30 @@ public struct FileSystemScanner: Sendable {
                     result.ownAllocated &+= allocated
                     result.fileCount += 1
                 }
-                if entry.modTime > result.newestSeconds { result.newestSeconds = entry.modTime }
+                if entry.modTimeSeconds > result.newestSeconds {
+                    result.newestSeconds = entry.modTimeSeconds
+                }
 
                 if logical >= threshold {
                     result.largeFiles.append(LargeFileRecord(
                         url: url.appending(path: entry.name),
                         logicalSize: logical,
                         allocatedSize: allocated,
-                        modificationDate: entry.modTime > 0 ? Date(timeIntervalSince1970: TimeInterval(entry.modTime / 1_000_000_000)) : nil,
-                        isHardLinked: entry.linkCount > 1
+                        modificationDate: entry.modTimeSeconds > 0
+                            ? Date(timeIntervalSince1970: TimeInterval(entry.modTimeSeconds))
+                            : nil,
+                        isHardLinked: entry.linkCount > 1,
+                        device: effectiveDevice,
+                        inode: entry.inode,
+                        linkCount: Int(entry.linkCount)
                     ))
                 }
+            } else if entry.isSymlink {
+                // A symlink is metadata, not content. The fallback path counts
+                // it separately for the same reason.
+                result.symlinkCount += 1
+            } else {
+                result.otherCount += 1
             }
         }
         return result
@@ -514,15 +540,17 @@ public struct FileSystemScanner: Sendable {
     /// * **No `Date` per entry.** Modification times are compared as integers
     ///   and converted once, per directory.
     private func scanDirectoryContents(url: URL, rootDevice: UInt64?) -> DirectoryScan {
-        let _ = try? "SCAN: scanDirectoryContents called for ".write(to: URL(fileURLWithPath: "/tmp/diskscope_debug.log"), atomically: false, encoding: .utf8)
-        let _ = try? url.path.write(to: URL(fileURLWithPath: "/tmp/diskscope_debug.log"), atomically: false, encoding: .utf8)
         let threshold = configuration.largeFileThreshold
-        let _ = try? ("BULK: About to call fetchEntries\n").write(to: URL(fileURLWithPath: "/tmp/diskscope_debug.log"), atomically: false, encoding: .utf8)
-        if let entries = BulkAttributeFetcher.fetchEntries(at: url) {
-            let _ = try? ("BULK: Using bulk fetch\n").write(to: URL(fileURLWithPath: "/tmp/diskscope_debug.log"), atomically: false, encoding: .utf8)
-            return processBulkEntries(entries, url: url, rootDevice: rootDevice, threshold: threshold)
-        } else {
-            let _ = try? ("BULK: fetchEntries returned nil\n").write(to: URL(fileURLWithPath: "/tmp/diskscope_debug.log"), atomically: false, encoding: .utf8)
+
+        // The bulk path reads a whole directory in one syscall. It is used only
+        // when the result is provably complete: the kernel cannot resume after
+        // filling the buffer, so a truncated fetch would mean quietly dropping
+        // entries, and this project does not report a number it has not
+        // measured.
+        if configuration.useBulkAttributes,
+           let bulk = BulkAttributeFetcher.fetchEntries(at: url),
+           bulk.isComplete {
+            return processBulkEntries(bulk.entries, url: url, rootDevice: rootDevice, threshold: threshold)
         }
 
         // Fallback to fstatat if bulk fetch fails
@@ -611,7 +639,10 @@ public struct FileSystemScanner: Sendable {
                         logicalSize: logical,
                         allocatedSize: allocated,
                         modificationDate: seconds > 0 ? Date(timeIntervalSince1970: TimeInterval(seconds)) : nil,
-                        isHardLinked: childStat.st_nlink > 1
+                        isHardLinked: childStat.st_nlink > 1,
+                        device: UInt64(childStat.st_dev),
+                        inode: UInt64(childStat.st_ino),
+                        linkCount: Int(childStat.st_nlink)
                     ))
                 }
 

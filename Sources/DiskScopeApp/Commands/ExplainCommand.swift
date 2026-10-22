@@ -33,9 +33,8 @@ public struct ExplainCommand: Command {
             return 1
         }
 
-        terminal.line("DEBUG: jsonPath = \(options.jsonPath ?? "nil")")
         if let jsonPath = options.jsonPath {
-                return try await runJSON(target: target, jsonPath: jsonPath, terminal: terminal)
+            return try await runJSON(target: target, jsonPath: jsonPath, terminal: terminal)
         }
 
         let configuration = ScanConfiguration(
@@ -272,7 +271,6 @@ public struct ExplainCommand: Command {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(output)
 
-        FileHandle.standardError.write(Data("DEBUG: writing to file: \(jsonPath)\n".utf8));
         if jsonPath == "-" {
             FileHandle.standardOutput.write(data)
             FileHandle.standardOutput.write(Data("\n".utf8))

@@ -26,24 +26,33 @@ public struct Options {
     public var flags: Set<String> = []
     public var values: [String: String] = [:]
 
+    /// Options whose value is the argument that follows them.
+    ///
+    /// Everything else is a switch. The list is explicit rather than inferred
+    /// because the alternative — treating every unknown `--name` as taking a
+    /// value — swallows whatever comes next. `diskscope explain --some-flag
+    /// ~/Downloads` would then read the path as the flag's value and scan the
+    /// home directory instead of what was asked for.
+    private static let valueOptions: Set<String> = ["json", "limit", "n", "path", "min-size"]
+
     public init(_ arguments: [String]) {
         var iterator = arguments.makeIterator()
         _ = iterator.next()   // executable name
 
         var remaining: [String] = []
-        var nextIsJsonValue = false
+        var pendingValueKey: String?
         for argument in iterator {
-            if nextIsJsonValue {
-                values["json"] = argument
-                nextIsJsonValue = false
+            if let key = pendingValueKey {
+                values[key] = argument
+                pendingValueKey = nil
                 continue
             }
             if argument.hasPrefix("--") {
                 let body = String(argument.dropFirst(2))
                 if let equals = body.firstIndex(of: "=") {
                     values[String(body[body.startIndex..<equals])] = String(body[body.index(after: equals)...])
-                } else if body == "json" {
-                    nextIsJsonValue = true
+                } else if Options.valueOptions.contains(body) {
+                    pendingValueKey = body
                 } else {
                     flags.insert(body)
                 }

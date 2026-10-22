@@ -112,6 +112,17 @@ public struct LargeFileRecord: Sendable, Identifiable, Codable {
     public var modificationDate: Date?
     public var isHardLinked: Bool
 
+    /// The device and inode the file lives on.
+    ///
+    /// Two names for the same file share these; two copies of the same
+    /// content do not. Anything that needs to tell those apart — the duplicate
+    /// finder, for one — needs them.
+    public var device: UInt64
+    public var inode: UInt64
+
+    /// How many links the file has in total.
+    public var linkCount: Int
+
     public var id: URL { url }
 
     public init(
@@ -119,13 +130,19 @@ public struct LargeFileRecord: Sendable, Identifiable, Codable {
         logicalSize: Int64,
         allocatedSize: Int64,
         modificationDate: Date?,
-        isHardLinked: Bool
+        isHardLinked: Bool,
+        device: UInt64 = 0,
+        inode: UInt64 = 0,
+        linkCount: Int = 1
     ) {
         self.url = url
         self.logicalSize = logicalSize
         self.allocatedSize = allocatedSize
         self.modificationDate = modificationDate
         self.isHardLinked = isHardLinked
+        self.device = device
+        self.inode = inode
+        self.linkCount = linkCount
     }
 }
 
@@ -205,6 +222,15 @@ public struct ScanResult: Sendable {
     /// our own arithmetic against what APFS claims.
     public var volumeTotals: [VolumeUsage]
 
+    /// The size at or above which individual files were recorded.
+    ///
+    /// Kept on the result because the file table is only complete above this
+    /// line, and anything that reads it needs to know where that line was.
+    public var largeFileThreshold: Int64
+
+    /// True when more files qualified for the file table than were kept.
+    public var largeFilesTruncated: Bool
+
     public var startedAt: Date
     public var finishedAt: Date
     public var elapsed: TimeInterval { finishedAt.timeIntervalSince(startedAt) }
@@ -227,7 +253,9 @@ public struct ScanResult: Sendable {
         finishedAt: Date = .now,
         deduplicatedHardLinks: Int = 0,
         scannedLogicalSize: Int64 = 0,
-        scannedAllocatedSize: Int64 = 0
+        scannedAllocatedSize: Int64 = 0,
+        largeFileThreshold: Int64 = 0,
+        largeFilesTruncated: Bool = false
     ) {
         self.roots = roots
         self.directories = directories
@@ -240,6 +268,8 @@ public struct ScanResult: Sendable {
         self.deduplicatedHardLinks = deduplicatedHardLinks
         self.scannedLogicalSize = scannedLogicalSize
         self.scannedAllocatedSize = scannedAllocatedSize
+        self.largeFileThreshold = largeFileThreshold
+        self.largeFilesTruncated = largeFilesTruncated
     }
 
     /// Total files observed across the scan.

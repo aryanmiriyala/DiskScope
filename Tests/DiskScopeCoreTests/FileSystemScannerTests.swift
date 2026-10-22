@@ -14,6 +14,7 @@
 // limitations under the License.
 
 import Foundation
+import Darwin
 import DiskScopeCore
 
 func registerScannerTests() {
@@ -193,5 +194,79 @@ func registerScannerTests() {
             200_000,
             "the .git pack should not be counted"
         )
+    }
+
+    test("scanner: the bulk path and the one-at-a-time path report the same numbers") {
+        let tree = try TempTree()
+        try tree.writeFile("a.txt", bytes: 1_000)
+        try tree.writeFile("sub/b.txt", bytes: 2_000)
+        try tree.writeFile("sub/deeper/c.txt", bytes: 3_000)
+        try tree.writeFile("empty.txt", bytes: 0)
+        try tree.writeFile("linked.txt", bytes: 1_500)
+        try FileManager.default.linkItem(
+            at: tree.url("linked.txt"),
+            to: tree.url("linked-alias.txt")
+        )
+        try FileManager.default.createSymbolicLink(
+            at: tree.url("link-to-dir"),
+            withDestinationURL: tree.url("sub")
+        )
+
+        func scan(useBulkAttributes: Bool) async throws -> ScanResult {
+            try await FileSystemScanner(
+                configuration: ScanConfiguration(
+                    roots: [tree.root],
+                    largeFileThreshold: 1,
+                    maximumLargeFiles: 10_000,
+                    useBulkAttributes: useBulkAttributes
+                )
+            ).scanToCompletion()
+        }
+
+        let bulk = try await scan(useBulkAttributes: true)
+        let oneAtATime = try await scan(useBulkAttributes: false)
+
+        try expectEqual(bulk.scannedLogicalSize, oneAtATime.scannedLogicalSize)
+        try expectEqual(bulk.scannedAllocatedSize, oneAtATime.scannedAllocatedSize)
+        try expectEqual(bulk.directories.count, oneAtATime.directories.count)
+        try expectEqual(bulk.largeFiles.count, oneAtATime.largeFiles.count)
+
+        // Same files, same sizes, same inodes.
+        let bulkFiles = Set(bulk.largeFiles.map { "\($0.url.path):\($0.logicalSize):\($0.inode)" })
+        let fallbackFiles = Set(oneAtATime.largeFiles.map { "\($0.url.path):\($0.logicalSize):\($0.inode)" })
+        try expectEqual(bulkFiles, fallbackFiles)
+
+        let bulkRoot = try require(bulk.directories.first { $0.url == tree.root })
+        let fallbackRoot = try require(oneAtATime.directories.first { $0.url == tree.root })
+        try expectEqual(bulkRoot.fileCount, fallbackRoot.fileCount)
+        try expectEqual(bulkRoot.symlinkCount, fallbackRoot.symlinkCount)
+        try expectEqual(bulkRoot.subtreeLogicalSize, fallbackRoot.subtreeLogicalSize)
+        try expectEqual(bulkRoot.subtreeAllocatedSize, fallbackRoot.subtreeAllocatedSize)
+    }
+
+    test("scanner: a directory too big for the bulk buffer is still counted in full") {
+        let tree = try TempTree()
+        // The bulk buffer holds roughly two and a half thousand entries. A
+        // directory with more than that cannot be read in one call, so the
+        // scanner has to fall back to reading it the slow way rather than
+        // report the entries it happened to see.
+        let count = 4_000
+        for index in 0..<count {
+            let fd = open(tree.url("f\(index)").path, O_CREAT | O_WRONLY | O_EXCL, 0o644)
+            try expect(fd >= 0, "could not create the test file")
+            close(fd)
+        }
+
+        let result = try await FileSystemScanner(
+            configuration: ScanConfiguration(
+                roots: [tree.root],
+                largeFileThreshold: 0,
+                maximumLargeFiles: 10_000
+            )
+        ).scanToCompletion()
+
+        let root = try require(result.directories.first { $0.url == tree.root })
+        try expectEqual(root.fileCount, count, "every file in a large directory is counted")
+        try expectEqual(result.largeFiles.count, count)
     }
 }
