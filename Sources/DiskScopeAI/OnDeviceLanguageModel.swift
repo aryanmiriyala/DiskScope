@@ -47,11 +47,12 @@ public struct OnDeviceLanguageModel: LanguageModel {
 
     public var unavailableReason: String? {
         if isAvailable { return nil }
+        #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {
             return "The on-device model could not be loaded. It may still be downloading in Settings › Apple Intelligence."
-        } else {
-            return "On-device models need macOS 26 on Apple Silicon. Use a cloud API key or a local server instead."
         }
+        #endif
+        return "On-device models need macOS 26 on Apple Silicon. Use a cloud API key or a local server instead."
     }
 
     public func proposeGroupings(for digest: ScanDigest) async throws -> [GroupingProposal] {
@@ -99,6 +100,7 @@ public struct OnDeviceLanguageModel: LanguageModel {
 
     // MARK: - FoundationModels bridge
 
+    #if canImport(FoundationModels)
     @available(macOS 26.0, *)
     private func generate(prompt: String) async throws -> String {
         let session = LanguageModelSession(instructions: PromptBuilder.systemPreamble)
@@ -110,9 +112,19 @@ public struct OnDeviceLanguageModel: LanguageModel {
             throw LanguageModelError.malformedResponse(error.localizedDescription)
         }
     }
+    #else
+    /// This SDK has no FoundationModels, so there is no session to open.
+    ///
+    /// The build still has to compile on an SDK that predates the framework,
+    /// which is every machine still on macOS 15. The runtime check above
+    /// already refuses to get this far.
+    private func generate(prompt: String) async throws -> String {
+        throw LanguageModelError.unavailable(unavailableReason ?? "Unavailable")
+    }
+    #endif
 
     private static var systemIsCapable: Bool {
-        #if arch(arm64)
+        #if arch(arm64) && canImport(FoundationModels)
         if #available(macOS 26.0, *) {
             // `SystemLanguageModel.default.availability` reflects whether the
             // model has actually been downloaded, which is a separate question

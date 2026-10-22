@@ -21,14 +21,6 @@ import Foundation
 /// storage products use, because matching what the user sees in Finder matters
 /// more than matching the physical truth of 1024-byte blocks.
 public enum ByteFormat {
-    private static let formatter: NumberFormatter = {
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.maximumFractionDigits = 1
-        f.minimumFractionDigits = 0
-        return f
-    }()
-
     private static let units = ["B", "KB", "MB", "GB", "TB", "PB"]
 
     public static func string(_ bytes: Int64, precise: Bool = false) -> String {

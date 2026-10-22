@@ -20,7 +20,11 @@ import DiskScopeCore
 @main
 struct DiskScopeMain {
     static func main() async {
-        let options = Options(CommandLine.arguments)
+        // `ProcessInfo` rather than `CommandLine`: `CommandLine.arguments` is a
+        // mutable static property, and older SDKs do not mark it safe, so the
+        // Swift 6 concurrency checker refuses to read it from here. Both hand
+        // back the same arguments.
+        let options = Options(ProcessInfo.processInfo.arguments)
         let terminal = Terminal(forceColor: options.has("no-color") ? false : nil)
 
         let commands: [any Command] = [

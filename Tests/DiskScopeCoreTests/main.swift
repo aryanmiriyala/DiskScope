@@ -31,5 +31,9 @@ registerBackendTests()
 registerKeychainTests()
 registerDuplicateFinderTests()
 
-let status = await TestRunner.run(filter: CommandLine.arguments.dropFirst().first)
+// `ProcessInfo` rather than `CommandLine`: `CommandLine.arguments` is a
+// mutable static property, and older SDKs do not mark it safe, so the Swift 6
+// concurrency checker refuses to read it from here. Both hand back the same
+// arguments.
+let status = await TestRunner.run(filter: ProcessInfo.processInfo.arguments.dropFirst().first)
 exit(status)
